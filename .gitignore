@@ -1,0 +1,80 @@
+# =========================
+# PlatformIO
+# =========================
+.pio/
+.piolibdeps/
+.clangd/
+
+# =========================
+# VS Code
+# =========================
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# =========================
+# Build / temp files
+# =========================
+build/
+dist/
+out/
+*.o
+*.obj
+*.elf
+*.bin
+*.hex
+*.map
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =========================
+# Python cache (just in case)
+# =========================
+__pycache__/
+*.pyc
+
+# =========================
+# Archive files
+# =========================
+*.zip
+*.tar
+*.gz
+*.rar
+*.7z
+
+# =========================
+# Local secrets / env files
+# =========================
+.env
+.env.*
+secrets.h
+secret.h
+config.local.h
+
+# =========================
+# Temporary editor files
+# =========================
+*.tmp
+*.swp
+*.swo
+*~
+
+# =========================
+# Optional: firmware output
+# Uncomment if needed
+# =========================
+# firmware.bin
+# *.csv
+# *.json

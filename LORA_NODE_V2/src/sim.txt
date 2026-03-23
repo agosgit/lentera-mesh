@@ -1,0 +1,91 @@
+void initSIM800L() {
+  Serial.println("🔌 Inisialisasi SIM800L...");
+  ModemSerial.begin(9600, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  // modem.restart();
+  // delay(1000);
+
+  // // Pastikan SIM terdeteksi
+  // int simStatus = modem.getSimStatus();
+  // if (simStatus != 3) {  // 3 = SIM_READY
+  //   Serial.println("❌ SIM belum siap, tunggu beberapa detik...");
+  //   for (int i = 0; i < 5; i++) {
+  //     delay(2000);
+  //     simStatus = modem.getSimStatus();
+  //     if (simStatus == 3) break;
+  //   }
+  //   if (simStatus != 3) {
+  //     Serial.println("❌ SIM tidak terdeteksi setelah 10 detik!");
+  //     simReady = false;
+  //     return;
+  //   }
+  // }
+
+  // // Registrasi ke jaringan seluler
+  // Serial.println("📡 Registrasi ke jaringan...");
+  // if (!modem.waitForNetwork(60000)) {
+  //   Serial.println("❌ Tidak bisa registrasi ke jaringan");
+  //   simReady = false;
+  //   return;
+  // }
+  // Serial.println("✅ Jaringan OK");
+
+  // // Aktifkan GPRS
+  // Serial.printf("🌐 Aktifkan GPRS (APN=%s)\n", config.apn.c_str());
+  // if (!modem.gprsConnect(config.apn.c_str(), config.simUser.c_str(), config.simPass.c_str())) {
+  //   Serial.println("❌ Gagal aktifkan GPRS");
+  //   simReady = false;
+  //   return;
+  // }
+
+  // Serial.println("✅ GPRS aktif dan siap digunakan");
+  // simReady = true;
+
+
+      Serial.println("Mode koneksi: Modem SIM800L");
+    modem.restart();
+
+    unsigned long lastBlink = 0;
+    const unsigned long blinkInterval = 200;
+
+    Serial.println("Menunggu registrasi jaringan seluler...");
+    while (!modem.waitForNetwork(1000)) {
+      unsigned long now = millis();
+      if (now - lastBlink >= blinkInterval) {
+        // digitalWrite(LED_RUN, !digitalRead(LED_RUN));
+        lastBlink = now;
+      }
+      // biar tidak freeze, kasih yield
+      yield();
+    }
+
+    Serial.println("\nJaringan seluler OK, mencoba aktifkan GPRS...");
+    lastBlink = 0;
+    while (!modem.gprsConnect(config.apn.c_str(), config.simUser.c_str(), config.simPass.c_str())) {
+      unsigned long now = millis();
+      if (now - lastBlink >= 400) { // beda interval
+        // digitalWrite(LED_RUN, !digitalRead(LED_RUN));
+        lastBlink = now;
+      }
+      yield();
+    }
+
+    if (modem.isGprsConnected()) {
+    //   // digitalWrite(LED_RUN, LOW);
+      Serial.println("\nGPRS aktif, mencoba MQTT...");
+    }
+    //   lastBlink = 0;
+    //   mqttClient.setServer(config.mqttHost.c_str(), config.mqttPort);
+    //   while (!mqttClient.connect("ESP32GSM", config.mqttUser.c_str(), config.mqttPass.c_str())) {
+    //     unsigned long now = millis();
+    //     if (now - lastBlink >= 500) {
+    //       digitalWrite(LED_RUN, !digitalRead(LED_RUN));
+    //       lastBlink = now;
+    //     }
+    //     yield();
+    //   }
+
+    //   digitalWrite(LED_RUN, LOW);
+    //   Serial.println("\nMQTT via GPRS connected!");
+    //   mqttOK = true;
+    // }
+}

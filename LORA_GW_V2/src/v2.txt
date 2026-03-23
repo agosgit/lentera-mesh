@@ -1,0 +1,460 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <LoRa.h>
+#include <WebServer.h>
+#include <Update.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+#define TINY_GSM_MODEM_SIM800
+#include <TinyGsmClient.h>
+#include <Wire.h>
+// #include <SD.h>
+#include <SPIFFS.h>
+
+#include <ArduinoJson.h>
+// ================== Konfigurasi PIN & LoRa, SIM800 ==================
+#define SS 5
+#define RST 4
+#define DIO0 32
+#define LED_RX 2
+#define LED_TX 12
+#define LED_SETTING 12
+#define BTN_MODE 0
+#define MODEM_RX 16
+#define MODEM_TX 17
+#define LORA_SF 7
+#define LORA_BAND 125E3
+#define LORA_FREQ 915E6
+#define LORA_TXPOW 8
+const unsigned long HOLD_MS = 3000;
+
+// ================== Variabel Global ==================
+WebServer server(80);
+HardwareSerial SerialSIM(2);
+TinyGsm modem(SerialSIM);
+TinyGsmClient gsmClient(modem);
+PubSubClient mqttClient(gsmClient);
+
+struct AppConfig {
+  String mmsi = "525000000";
+  String shipName = "DefaultShip";
+  String apn = "internet";
+  String simUser = "";
+  String simPass = "";
+} config;
+
+uint64_t MAC_FULL;
+uint32_t NODE_ID;
+bool IS_GATEWAY = true;
+bool loraReady = false;
+bool mqttReady = false;
+
+const char *MQTT_HOST = "aisport.ppns.ac.id";
+const int MQTT_PORT = 1883;
+const char *MQTT_USER = "mosquitto";
+const char *MQTT_PASS = "mosquitto";
+const char *MQTT_TOPIC = "lentera/GATE6D9FE8";
+unsigned long lastMqttReconnect = 0;
+unsigned long lastPing = 0;
+
+// ================= LED =================
+void blinkLED(int pin, int t = 100) {
+  digitalWrite(pin, HIGH);
+  delay(t);
+  digitalWrite(pin, LOW);
+}
+// ================= AIS ENCODE =================
+struct AISMessage18 {
+  uint8_t message_id = 18;      // 6 bits
+  uint8_t repeat_indicator = 0; // 2 bits
+  uint32_t mmsi;                // 30 bits
+  uint8_t reserved = 0;         // 8 bits
+  uint16_t sog;                 // 10 bits (Speed Over Ground * 10)
+  bool position_accuracy = false; // 1 bit
+  float longitude;              // 28 bits (1/10000 minute = 1/600000 derajat)
+  float latitude;               // 27 bits
+  uint16_t cog;                 // 12 bits (Course Over Ground * 10)
+  uint16_t heading;             // 9 bits (True Heading)
+  uint8_t utc_second;           // 6 bits
+  uint8_t regional = 0;         // 2 bits
+  bool cs_flag = false;         // 1 bit
+  bool display_flag = false;    // 1 bit
+  bool dsc_flag = false;        // 1 bit
+  bool band_flag = false;       // 1 bit
+  bool msg22_flag = false;      // 1 bit
+  bool assigned_flag = false;   // 1 bit
+  bool raim_flag = false;       // 1 bit
+  uint32_t radio_status = 0;    // 20 bits
+};
+
+void writeBits(uint8_t *buffer, uint32_t value, uint16_t startBit, uint8_t numBits, bool isSigned = false)
+{
+  if (isSigned && (value & (1UL << (numBits - 1))))
+    value |= 0xFFFFFFFFUL << numBits;
+  for (uint8_t i = 0; i < numBits; i++)
+  {
+    uint16_t pos = startBit + i;
+    uint8_t byteIdx = pos / 8;
+    uint8_t bitIdx = 7 - (pos % 8);
+    if (value & (1UL << (numBits - 1 - i)))
+      buffer[byteIdx] |= (1 << bitIdx);
+    else
+      buffer[byteIdx] &= ~(1 << bitIdx);
+  }
+}
+
+void bitsToAISString(const uint8_t *bits, uint16_t bitCount, char *output)
+{
+  uint16_t charCount = (bitCount + 5) / 6;
+  for (uint16_t i = 0; i < charCount; i++)
+  {
+    uint8_t sixBits = 0;
+    for (uint8_t j = 0; j < 6; j++)
+    {
+      uint16_t bitIdx = i * 6 + j;
+      if (bitIdx < bitCount)
+        sixBits = (sixBits << 1) | ((bits[bitIdx / 8] >> (7 - (bitIdx % 8))) & 1);
+      else
+        sixBits <<= 1;
+    }
+    output[i] = (sixBits < 40) ? (sixBits + 48) : (sixBits + 56);
+  }
+  output[charCount] = '\0';
+}
+
+String encodeMessage18(const AISMessage18 &msg) {
+  uint8_t bits[21] = {0};  // 168 bits = 21 bytes
+
+  writeBits(bits, msg.message_id, 0, 6);
+  writeBits(bits, msg.repeat_indicator, 6, 2);
+  writeBits(bits, msg.mmsi, 8, 30);
+  writeBits(bits, msg.reserved, 38, 8);
+  writeBits(bits, msg.sog, 46, 10);
+  writeBits(bits, msg.position_accuracy ? 1 : 0, 56, 1);
+  int32_t lng_enc = (int32_t)round(msg.longitude * 600000.0);
+  writeBits(bits, lng_enc, 57, 28, true);
+  int32_t lat_enc = (int32_t)round(msg.latitude * 600000.0);
+  writeBits(bits, lat_enc, 85, 27, true);
+  writeBits(bits, msg.cog, 112, 12);
+  writeBits(bits, msg.heading, 124, 9);
+  writeBits(bits, msg.utc_second, 133, 6);
+  writeBits(bits, msg.regional, 139, 2);
+  writeBits(bits, msg.cs_flag ? 1 : 0, 141, 1);
+  writeBits(bits, msg.display_flag ? 1 : 0, 142, 1);
+  writeBits(bits, msg.dsc_flag ? 1 : 0, 143, 1);
+  writeBits(bits, msg.band_flag ? 1 : 0, 144, 1);
+  writeBits(bits, msg.msg22_flag ? 1 : 0, 145, 1);
+  writeBits(bits, msg.assigned_flag ? 1 : 0, 146, 1);
+  writeBits(bits, msg.raim_flag ? 1 : 0, 147, 1);
+  writeBits(bits, msg.radio_status, 148, 20);
+
+  char payload[29];
+  bitsToAISString(bits, 168, payload);
+  return String(payload);
+}
+
+String nmeaChecksum(const String &sentence)
+{
+  int chk = 0;
+  for (int i = 1; i < sentence.length(); i++)
+    chk ^= sentence[i];
+  char buf[5];
+  sprintf(buf, "*%02X", chk);
+  return String(buf);
+}
+String makeAivdm(const String &payload)
+{
+  String base = "!AIVDM,1,1,,A," + payload + ",0";
+  return base + nmeaChecksum(base);
+}
+
+
+// ================== Log SPIFFS ==================
+
+void saveConfig() {
+  StaticJsonDocument<256> doc;
+  doc["mmsi"] = config.mmsi;
+  doc["ship"] = config.shipName;
+  doc["apn"] = config.apn;
+  doc["simUser"] = config.simUser;
+  doc["simPass"] = config.simPass;
+  File f = SPIFFS.open("/config.json", FILE_WRITE);
+  if (!f) {
+    Serial.println("❌ Gagal buka file config.json untuk ditulis!");
+    return;
+  }
+  if (serializeJson(doc, f) == 0) {
+    Serial.println("❌ Gagal serialisasi config ke JSON!");
+  } else {
+    Serial.println("✅ Config berhasil disimpan ke SPIFFS.");
+  }
+  f.close();
+}
+
+
+void loadConfig() {
+  File f = SPIFFS.open("/config.json", FILE_READ);
+  if (!f) {
+    Serial.println("⚠️ config.json belum ada, pakai default!");
+    return;
+  }
+  StaticJsonDocument<256> doc;
+  DeserializationError err = deserializeJson(doc, f);
+  if (err) {
+    Serial.println("❌ Gagal baca config.json! Pakai default.");
+    f.close();
+    return;
+  }
+  if (doc.containsKey("mmsi")) config.mmsi = String((const char*)doc["mmsi"]);
+  if (doc.containsKey("ship")) config.shipName = String((const char*)doc["ship"]);
+  if (doc.containsKey("apn")) config.apn = String((const char*)doc["apn"]);
+  if (doc.containsKey("simUser")) config.simUser = String((const char*)doc["simUser"]);
+  if (doc.containsKey("simPass")) config.simPass = String((const char*)doc["simPass"]);
+  Serial.printf("✅ Config loaded dari SPIFFS: MMSI=%s, Ship=%s\n", config.mmsi.c_str(), config.shipName.c_str());
+  f.close();
+}
+
+
+// ================== Fungsi OTA & WebConfig ==================
+const char PAGE_HTML[] PROGMEM = R"HTML(
+<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<title>ESP32 OTA & Config</title>
+<style>
+body{font-family:sans-serif;background:#0f1226;color:#e9ecf1;padding:20px}
+.card{background:#1b1e3a;padding:16px;border-radius:10px;max-width:600px;margin:auto}
+input,button{width:100%;padding:10px;margin-top:5px;border-radius:6px;border:1px solid #444;background:#222;color:#eee}
+button{background:#3b82f6;border:none}
+h2{color:#60a5fa}
+</style></head><body>
+<div class="card">
+<h2>📦 OTA Firmware Update</h2>
+<form method="POST" action="/update" enctype="multipart/form-data">
+<label>Upload Firmware (.bin)</label>
+<input type="file" name="firmware" accept=".bin">
+<button type="submit">Upload</button>
+</form>
+</div>
+<div class="card">
+<h2>⚙️ Konfigurasi Gateway (SIM800L)</h2>
+<form method="POST" action="/config">
+<label>MMSI</label><input name="mmsi" value="%MMSI%">
+<label>Nama Kapal</label><input name="ship" value="%SHIP%">
+<label>APN</label><input name="apn" value="%APN%">
+<label>SIM User</label><input name="simuser" value="%SIMUSER%">
+<label>SIM Password</label><input type="password" name="simpass" value="%SIMPASS%">
+<button type="submit">Simpan Konfigurasi</button>
+</form>
+</div>
+</body></html>
+)HTML";
+
+void sendRoot()
+{
+  String html = PAGE_HTML;
+  html.replace("%MMSI%", config.mmsi);
+  html.replace("%SHIP%", config.shipName);
+  html.replace("%APN%", config.apn);
+  html.replace("%SIMUSER%", config.simUser);
+  html.replace("%SIMPASS%", config.simPass);
+  server.send(200, "text/html", html);
+}
+
+void handleUpdateUpload()
+{
+  HTTPUpload &upload = server.upload();
+  static bool started = false;
+  if (upload.status == UPLOAD_FILE_START) {
+    started = Update.begin(UPDATE_SIZE_UNKNOWN);
+    Serial.println("[OTA] Mulai upload firmware...");
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (started) Update.write(upload.buf, upload.currentSize);
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("[OTA] Selesai upload: %u bytes\n", upload.totalSize);
+    } else {
+      Serial.println("[OTA] Gagal update!");
+    }
+  }
+}
+
+void handleUpdateFinish()
+{
+  server.send(200, "text/plain", "✅ OTA Selesai — perangkat akan reboot...");
+  delay(500);
+  ESP.restart();
+}
+
+
+void handleConfigPost()
+{
+  if (server.method() == HTTP_POST) {
+    if (server.hasArg("mmsi")) config.mmsi = server.arg("mmsi");
+    if (server.hasArg("ship")) config.shipName = server.arg("ship");
+    if (server.hasArg("apn")) config.apn = server.arg("apn");
+    if (server.hasArg("simuser")) config.simUser = server.arg("simuser");
+    if (server.hasArg("simpass")) config.simPass = server.arg("simpass");
+    saveConfig();
+    Serial.println("📋 Konfigurasi baru disimpan:");
+    Serial.printf("  MMSI   : %s\n", config.mmsi.c_str());
+    Serial.printf("  Kapal  : %s\n", config.shipName.c_str());
+    Serial.printf("  APN    : %s\n", config.apn.c_str());
+    Serial.printf("  SIMUSR : %s\n", config.simUser.c_str());
+    Serial.printf("  SIMPWD : %s\n", config.simPass.c_str());
+
+    server.sendHeader("Location", "/");
+    server.send(303);
+  }
+}
+
+// ================== Handler Mesh & LoRa ==================
+// ================= LoRa =================
+void sendPacket(String pkt) {
+  if (LoRa.beginPacket() == 0) {
+    Serial.println("⚠️ TX fail");
+    return;
+  }
+  LoRa.print(pkt);
+  LoRa.endPacket();
+  blinkLED(LED_TX);
+  Serial.printf("[TX] %s\n", pkt.c_str());
+}
+
+void sendPing() {
+  String macLow = String((uint32_t)(MAC_FULL & 0xFFFFFF), HEX);
+  macLow.toUpperCase();
+  sendPacket("PINK:GATE" + macLow);
+}
+
+// ================= HANDLERS =================
+void gw_handlePacket(String data, int rssi) {
+  if (data.startsWith("PINK:")) {
+    String chain = data.substring(5);
+    String temp = chain; temp.replace("-", "");
+    int hopCount = chain.length() - temp.length();
+    Serial.printf("📶 Mesh Route (%d hop): %s (RSSI %d)\n", hopCount, chain.c_str(), rssi);
+  }
+
+  else if (data.startsWith("MSG:")) {
+    // Format: MSG:GATE6D9FE8-525642556-525303404:<payload>
+    int colonIdx = data.indexOf(':', 4);
+    String route = (colonIdx > 0) ? data.substring(4, colonIdx) : "";
+    String payload = (colonIdx > 0) ? data.substring(colonIdx + 1) : data.substring(4);
+
+    String nmea = makeAivdm(payload);
+    Serial.printf("📩 AIS via jalur [%s] RSSI:%d Data:%s\n", route.c_str(), rssi, payload.c_str());
+
+    if (mqttClient.connected()) {
+      mqttClient.publish(MQTT_TOPIC, nmea.c_str());
+      Serial.printf("📡 MQTT Publish: %s\n", nmea.c_str());
+    }
+  }
+}
+
+void mqttReconnect() {
+  if (mqttClient.connected()) return;
+  if (millis() - lastMqttReconnect < 5000) return;
+  lastMqttReconnect = millis();
+  Serial.print("🔌 MQTT via SIM connecting...");
+  if (mqttClient.connect("ESP32GSM", MQTT_USER, MQTT_PASS)) {
+    Serial.println(" connected!");
+  } else {
+    Serial.printf(" failed rc=%d\n", mqttClient.state());
+  }
+}
+
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_TX, OUTPUT);
+  pinMode(LED_RX, OUTPUT);
+  pinMode(LED_SETTING, OUTPUT);
+  pinMode(BTN_MODE, INPUT_PULLUP);
+
+  MAC_FULL = ESP.getEfuseMac();
+  // NODE_ID = (uint32_t)(MAC_FULL & 0xFFFF);
+  if (!SPIFFS.begin(true)) {
+    Serial.println("❌ SPIFFS mount gagal!");
+  } else {
+    Serial.println("✅ SPIFFS ready");
+    loadConfig();
+  }
+  // Tombol Mode Setting (OTA/config)
+  unsigned long t0 = millis();
+  bool hold = false;
+  while (millis() - t0 < HOLD_MS) {
+    if (digitalRead(BTN_MODE) == LOW) hold = true;
+    else { hold = false; break; }
+  }
+  if (hold) {
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("ESP32-OTA-GATE", "mesh12345");
+    server.on("/", HTTP_GET, sendRoot);
+    server.on("/update", HTTP_POST, handleUpdateFinish, handleUpdateUpload);
+    server.on("/config", HTTP_POST, handleConfigPost);
+    server.begin();
+    while (true) {
+      server.handleClient();
+      digitalWrite(LED_SETTING, (millis() / 300) % 2);
+    }
+  }
+
+  // Inisialisasi LoRa
+  LoRa.setPins(SS, RST, DIO0);
+  if (!LoRa.begin(LORA_FREQ)) {
+    Serial.println("❌ LoRa init gagal");
+  } else {
+    LoRa.setSpreadingFactor(LORA_SF);
+    LoRa.setSignalBandwidth(LORA_BAND);
+    LoRa.setTxPower(LORA_TXPOW);
+    LoRa.enableCrc();
+    loraReady = true;
+    Serial.println("✅ LoRa siap digunakan"); 
+  }
+
+  // Inisialisasi SIM800L + MQTT
+  SerialSIM.begin(9600, SERIAL_8N1, MODEM_RX, MODEM_TX);
+  Serial.println("📶 Inisialisasi SIM800L...");
+  modem.restart();
+
+  Serial.println("⏳ Menunggu jaringan seluler...");
+  if (modem.waitForNetwork(60000)) {
+    Serial.println("✅ Modem terdaftar jaringan");
+    modem.gprsConnect(config.apn.c_str(), config.simUser.c_str(), config.simPass.c_str());
+    if (modem.isGprsConnected()) {
+      mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+      mqttReady = true;
+      Serial.println("✅ GPRS & MQTT Siap");
+    } else {
+      Serial.println("❌ GPRS gagal aktif");
+    }
+  } else {
+    Serial.println("❌ Modem gagal registrasi jaringan");
+  }
+
+  Serial.println("\n=== STATUS INISIALISASI ===");
+  Serial.printf("LoRa : %s\n", loraReady ? "OK" : "FAIL");
+  Serial.printf("GSM  : %s\n", mqttReady ? "OK" : "N/A (Node)");
+  Serial.println("============================");
+}
+
+void loop() {
+  server.handleClient();  
+
+  if (!mqttClient.connected()) mqttReconnect();
+  mqttClient.loop();
+
+  if (millis() - lastPing > 30000 + random(0, 5000)) {
+    sendPing();
+    lastPing = millis();
+  }
+
+  // LoRa receive
+  int sz = LoRa.parsePacket();
+  if (sz) {
+    String data = "";
+    while (LoRa.available()) data += (char)LoRa.read();
+    int rssi = LoRa.packetRssi();
+    blinkLED(LED_RX);
+    gw_handlePacket(data, rssi);
+  }
+}
