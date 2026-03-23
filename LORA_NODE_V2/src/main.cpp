@@ -71,11 +71,11 @@ struct AppConfig {
   String apn = "internet";
   String simUser = "";
   String simPass = "";
-  String mqttHost = "aisport.ppns.ac.id";
+  String mqttHost = "xxxx";
   int mqttPort = 1883;
   String mqttUser = "mosquitto";
   String mqttPass = "mosquitto";
-  String mqttTopic = "lentera/GATE6D9FE8";
+  String mqttTopic = "lora/GATE6D9FE8";
   unsigned long loraInterval = 60000;   // <--- Tambahan
   unsigned long gsmInterval  = 10000; 
   bool enableLoRa = true;   // <--- Tambahan

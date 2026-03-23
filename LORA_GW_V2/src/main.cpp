@@ -48,11 +48,11 @@ struct AppConfig {
   String wifiPass = "";
 
   // ===== Tambahan untuk konfigurasi MQTT =====
-  String mqttHost = "aisport.ppns.ac.id";
+  String mqttHost = "xxxx";
   int mqttPort = 1883;
   String mqttUser = "mosquitto";
   String mqttPass = "mosquitto";
-  String mqttTopic = "lentera/GATE6D9FE8";
+  String mqttTopic = "lora/GATE6D9FE8";
 } config;
 
 uint64_t MAC_FULL;
