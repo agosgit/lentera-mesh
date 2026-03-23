@@ -61,11 +61,6 @@ bool IS_GATEWAY = true;
 bool loraReady = false;
 bool mqttReady = false;
 
-// const char *MQTT_HOST = "aisport.ppns.ac.id";
-// const int MQTT_PORT = 1883;
-// const char *MQTT_USER = "mosquitto";
-// const char *MQTT_PASS = "mosquitto";
-// const char *MQTT_TOPIC = "lentera/GATE6D9FE8";
 unsigned long lastMqttReconnect = 0;
 unsigned long lastPing = 0;
 
